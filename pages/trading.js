@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 
 const NOTION_TOKEN = "ntn_J580615544116crlsXr6Rl6UJLsFshQbJIGBf1A17K94Eo";
 const DB = {
@@ -13,6 +13,7 @@ const C = {
   bg: "#0d0f14", surface: "#13161e", card: "#181c26", border: "#1e2433",
   accent: "#c8a96e", accentDim: "#8a6e3e", red: "#d64c4c", green: "#4caf80",
   yellow: "#d4a843", text: "#e8e4dc", muted: "#7a8099", dim: "#4a5068",
+  blue: "#4c9fd6",
 };
 
 const AVOID_SETUPS = [
@@ -31,43 +32,32 @@ const AVOID_SETUPS = [
 async function notionRequest(endpoint, method = "GET", body = null) {
   const opts = {
     method,
-    headers: {
-      "Authorization": `Bearer ${NOTION_TOKEN}`,
-      "Content-Type": "application/json",
-      "Notion-Version": "2022-06-28",
-    },
+    headers: { "Content-Type": "application/json" },
   };
   if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(`https://api.anthropic.com/v1/proxy/notion/v1/${endpoint}`, opts);
+  const res = await fetch(`/api/notion?path=${endpoint}`, opts);
   return res.json();
 }
 
 async function saveSessionToNotion(data) {
   const today = new Date().toISOString().split("T")[0];
   const sessionName = `${today} — ${data.sessione}`;
-  
-  const props = {
-    "Name": { title: [{ text: { content: sessionName } }] },
-    "Sessione": { select: { name: data.sessione } },
-    "Data": { date: { start: today } },
-    "Decision Quality Score": { number: data.dqs },
-    "Calma pre-trade": { number: data.calma },
-    "Chiarezza H1": { number: data.chiarezza },
-    "Fretta pre-trade": { number: data.fretta },
-    "Loss sessione": { number: data.loss },
-    "Risultato %": { number: data.risultato || 0 },
-    "Rivalsa presente": { checkbox: data.rivalsa },
-    "Prova di identità": { rich_text: [{ text: { content: data.provaIdentita || "" } }] },
-    "Note libere": { rich_text: [{ text: { content: data.note || "" } }] },
-  };
-
-  if (data.comeGestito) {
-    props["Come ho gestito la rivalsa"] = { select: { name: data.comeGestito } };
-  }
-
   return notionRequest("pages", "POST", {
     parent: { database_id: DB.sessioni },
-    properties: props,
+    properties: {
+      "Name": { title: [{ text: { content: sessionName } }] },
+      "Sessione": { select: { name: data.sessione } },
+      "Data": { date: { start: today } },
+      "Decision Quality Score": { number: data.dqs },
+      "Calma pre-trade": { number: data.calma },
+      "Chiarezza H1": { number: data.chiarezza },
+      "Fretta pre-trade": { number: data.fretta },
+      "Loss sessione": { number: data.loss },
+      "Risultato %": { number: data.risultato || 0 },
+      "Rivalsa presente": { checkbox: data.rivalsa },
+      "Prova di identità": { rich_text: [{ text: { content: data.provaIdentita || "" } }] },
+      "Note libere": { rich_text: [{ text: { content: data.note || "" } }] },
+    },
   });
 }
 
@@ -85,28 +75,13 @@ async function saveTrackerToNotion(data) {
   });
 }
 
-async function saveSetupEvitato(setup, sessione) {
+async function saveSetupEvitato(setup) {
   return notionRequest("pages", "POST", {
     parent: { database_id: DB.setupEvitati },
     properties: {
       "Name": { title: [{ text: { content: setup.label } }] },
       "Data": { date: { start: new Date().toISOString().split("T")[0] } },
       "Tipo di setup evitato": { multi_select: [{ name: setup.icon + " " + setup.label.substring(0, 20) }] },
-    },
-  });
-}
-
-async function saveSettimana(data) {
-  const label = `Sett. ${getWeekNumber()} — ${new Date().toLocaleDateString("it-IT", { day: "numeric", month: "short" })}`;
-  return notionRequest("pages", "POST", {
-    parent: { database_id: DB.settimane },
-    properties: {
-      "Name": { title: [{ text: { content: label } }] },
-      "Loss totali": { number: data.lossCount },
-      "Performance %": { number: data.performance || 0 },
-      "Setup evitati (totale)": { number: data.setupEvitati || 0 },
-      "Vittoria invisibile della settimana": { rich_text: [{ text: { content: data.vittoriaInvisibile || "" } }] },
-      "Note settimanali": { rich_text: [{ text: { content: data.note || "" } }] },
     },
   });
 }
@@ -124,6 +99,8 @@ const initSession = () => ({
   provaIdentita: "", note: "",
 });
 
+const MONTHS = ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"];
+
 export default function App() {
   const today = new Date().toLocaleDateString("it-IT", { weekday: "long", day: "numeric", month: "long" });
   const [tab, setTab] = useState("morning");
@@ -136,6 +113,7 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState({ london: false, ny: false, evening: false });
   const [toast, setToast] = useState(null);
+  const [calendarDays, setCalendarDays] = useState({});
 
   const showToast = (msg, type = "success") => {
     setToast({ msg, type });
@@ -145,15 +123,10 @@ export default function App() {
   const dqs = (s) => Math.round((s.calma + s.chiarezza + s.h1) / 3);
   const scoreColor = (v) => v >= 8 ? C.green : v >= 5 ? C.yellow : C.red;
   const rushColor = (v) => v <= 3 ? C.green : v <= 6 ? C.yellow : C.red;
-
   const updateLondon = (k, v) => setLondon(p => ({ ...p, [k]: v }));
   const updateNy = (k, v) => setNy(p => ({ ...p, [k]: v }));
-
   const toggleAvoided = (setter, id) => {
-    setter(p => ({
-      ...p,
-      avoided: p.avoided.includes(id) ? p.avoided.filter(x => x !== id) : [...p.avoided, id]
-    }));
+    setter(p => ({ ...p, avoided: p.avoided.includes(id) ? p.avoided.filter(x => x !== id) : [...p.avoided, id] }));
   };
 
   const handleSaveLondon = async () => {
@@ -162,8 +135,10 @@ export default function App() {
       await saveSessionToNotion({ ...london, sessione: "🇬🇧 Londra", dqs: dqs(london) });
       for (const id of london.avoided) {
         const s = AVOID_SETUPS.find(x => x.id === id);
-        if (s) await saveSetupEvitato(s, "Londra");
+        if (s) await saveSetupEvitato(s);
       }
+      const todayKey = new Date().toISOString().split("T")[0];
+      setCalendarDays(p => ({ ...p, [todayKey]: { ...p[todayKey], london: london.risultato >= 0 ? "green" : "red", londonResult: london.risultato } }));
       setSaved(p => ({ ...p, london: true }));
       showToast("✅ Sessione Londra salvata su Notion!");
     } catch (e) {
@@ -178,8 +153,10 @@ export default function App() {
       await saveSessionToNotion({ ...ny, sessione: "🇺🇸 New York", dqs: dqs(ny) });
       for (const id of ny.avoided) {
         const s = AVOID_SETUPS.find(x => x.id === id);
-        if (s) await saveSetupEvitato(s, "New York");
+        if (s) await saveSetupEvitato(s);
       }
+      const todayKey = new Date().toISOString().split("T")[0];
+      setCalendarDays(p => ({ ...p, [todayKey]: { ...p[todayKey], ny: ny.risultato >= 0 ? "green" : "red", nyResult: ny.risultato } }));
       setSaved(p => ({ ...p, ny: true }));
       showToast("✅ Sessione NY salvata su Notion!");
     } catch (e) {
@@ -205,6 +182,7 @@ export default function App() {
     { id: "london", label: "🇬🇧 Londra" },
     { id: "ny", label: "🇺🇸 New York" },
     { id: "evening", label: "🌙 Serale" },
+    { id: "calendar", label: "📅 Calendario" },
     { id: "rules", label: "📋 Regole" },
   ];
 
@@ -218,7 +196,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Header */}
       <div style={{ borderBottom: `1px solid ${C.border}`, padding: "20px 24px 14px" }}>
         <div style={{ maxWidth: 760, margin: "0 auto", display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
           <div>
@@ -239,7 +216,6 @@ export default function App() {
         </div>
       </div>
 
-      {/* Tabs */}
       <div style={{ borderBottom: `1px solid ${C.border}`, padding: "0 24px", overflowX: "auto" }}>
         <div style={{ maxWidth: 760, margin: "0 auto", display: "flex" }}>
           {tabs.map(t => (
@@ -248,10 +224,8 @@ export default function App() {
         </div>
       </div>
 
-      {/* Content */}
       <div style={{ maxWidth: 760, margin: "0 auto", padding: "24px" }}>
 
-        {/* MORNING */}
         {tab === "morning" && (
           <div>
             <SectionTitle icon="🌅" title="Rituale Pre-Mercato" sub="Entro le 07:45 — prima di aprire i grafici" />
@@ -281,7 +255,6 @@ export default function App() {
           </div>
         )}
 
-        {/* LONDON */}
         {tab === "london" && (
           <div>
             <SectionTitle icon="🇬🇧" title="Sessione Londra" sub="08:00 — 12:00" />
@@ -330,7 +303,7 @@ export default function App() {
                 ))}
               </div>
               {london.rivalsa && (
-                <div>
+                <div style={{ marginBottom: 14 }}>
                   <Label>Come ho gestito</Label>
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                     {["✅ Chiuso piattaforma", "⚠️ Resistito", "❌ Ho ceduto"].map(opt => (
@@ -339,14 +312,13 @@ export default function App() {
                   </div>
                 </div>
               )}
-              <Label style={{ marginTop: 14 }}>Prova di identità</Label>
+              <Label>Prova di identità</Label>
               <TA value={london.provaIdentita} onChange={v => updateLondon("provaIdentita", v)} placeholder="Una cosa concreta che dimostra chi stai diventando..." rows={2} />
             </Card>
             <SaveBtn onClick={handleSaveLondon} saving={saving} saved={saved.london} label="SALVA SESSIONE SU NOTION" />
           </div>
         )}
 
-        {/* NY */}
         {tab === "ny" && (
           <div>
             <SectionTitle icon="🇺🇸" title="Sessione New York" sub="14:00 — 18:00" />
@@ -389,7 +361,7 @@ export default function App() {
                 ))}
               </div>
               {ny.rivalsa && (
-                <div>
+                <div style={{ marginBottom: 14 }}>
                   <Label>Come ho gestito</Label>
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                     {["✅ Chiuso piattaforma", "⚠️ Resistito", "❌ Ho ceduto"].map(opt => (
@@ -398,14 +370,13 @@ export default function App() {
                   </div>
                 </div>
               )}
-              <Label style={{ marginTop: 14 }}>Prova di identità</Label>
+              <Label>Prova di identità</Label>
               <TA value={ny.provaIdentita} onChange={v => updateNy("provaIdentita", v)} placeholder="Una cosa concreta che dimostra chi stai diventando..." rows={2} />
             </Card>
             <SaveBtn onClick={handleSaveNy} saving={saving} saved={saved.ny} label="SALVA SESSIONE SU NOTION" />
           </div>
         )}
 
-        {/* EVENING */}
         {tab === "evening" && (
           <div>
             <SectionTitle icon="🌙" title="Review Serale" sub="Entro le 20:00" />
@@ -418,7 +389,7 @@ export default function App() {
             </Card>
             <Card title="TRACKER MENTALE">
               <Slider label="Lucidità generale" value={tracker.lucidita} onChange={v => setTracker(p => ({ ...p, lucidita: v }))} color={scoreColor(tracker.lucidita)} />
-              <Slider label="Livello di rivalsa (basso = meglio)" value={tracker.rivalsa} onChange={v => setTracker(p => ({ ...p, rivalsa: v }))} color={v => v <= 3 ? C.green : v <= 6 ? C.yellow : C.red} />
+              <Slider label="Livello di rivalsa (basso = meglio)" value={tracker.rivalsa} onChange={v => setTracker(p => ({ ...p, rivalsa: v }))} color={tracker.rivalsa <= 3 ? C.green : tracker.rivalsa <= 6 ? C.yellow : C.red} />
               <Label>Nota psicologica</Label>
               <TA value={tracker.nota} onChange={v => setTracker(p => ({ ...p, nota: v }))} placeholder="Osservazione libera sul tuo stato interno oggi..." rows={2} />
               <Label style={{ marginTop: 12 }}>Segnale da monitorare domani</Label>
@@ -434,7 +405,10 @@ export default function App() {
           </div>
         )}
 
-        {/* RULES */}
+        {tab === "calendar" && (
+          <CalendarView calendarDays={calendarDays} setCalendarDays={setCalendarDays} />
+        )}
+
         {tab === "rules" && (
           <div>
             <SectionTitle icon="📋" title="Regole & Setup da Evitare" sub="Leggi ogni domenica e ogni mattina" />
@@ -480,7 +454,151 @@ export default function App() {
   );
 }
 
-// Sub-components
+function CalendarView({ calendarDays, setCalendarDays }) {
+  const now = new Date();
+  const [viewYear, setViewYear] = useState(now.getFullYear());
+  const [viewMonth, setViewMonth] = useState(now.getMonth());
+  const [selectedDay, setSelectedDay] = useState(null);
+  const [editDay, setEditDay] = useState(null);
+
+  const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+  const firstDayOfWeek = new Date(viewYear, viewMonth, 1).getDay();
+  const offset = firstDayOfWeek === 0 ? 6 : firstDayOfWeek - 1;
+
+  const getDateKey = (day) => `${viewYear}-${String(viewMonth + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+
+  const dayColor = (key) => {
+    const d = calendarDays[key];
+    if (!d) return null;
+    if (d.type === "no-trade") return C.blue;
+    if (d.result > 0) return C.green;
+    if (d.result < 0) return C.red;
+    return C.yellow;
+  };
+
+  const weekDays = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"];
+
+  const prevMonth = () => { if (viewMonth === 0) { setViewMonth(11); setViewYear(y => y - 1); } else setViewMonth(m => m - 1); };
+  const nextMonth = () => { if (viewMonth === 11) { setViewMonth(0); setViewYear(y => y + 1); } else setViewMonth(m => m + 1); };
+
+  const totalResult = Object.entries(calendarDays)
+    .filter(([k]) => k.startsWith(`${viewYear}-${String(viewMonth + 1).padStart(2, "0")}`))
+    .reduce((sum, [, d]) => sum + (d.result || 0), 0);
+
+  const greenDays = Object.entries(calendarDays).filter(([k, d]) => k.startsWith(`${viewYear}-${String(viewMonth + 1).padStart(2, "0")}`) && d.result > 0).length;
+  const redDays = Object.entries(calendarDays).filter(([k, d]) => k.startsWith(`${viewYear}-${String(viewMonth + 1).padStart(2, "0")}`) && d.result < 0).length;
+  const noTradeDays = Object.entries(calendarDays).filter(([k, d]) => k.startsWith(`${viewYear}-${String(viewMonth + 1).padStart(2, "0")}`) && d.type === "no-trade").length;
+
+  return (
+    <div>
+      <SectionTitle icon="📅" title="Calendario Mensile" sub="Storico visivo delle sessioni" />
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <button onClick={prevMonth} style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.text, padding: "8px 14px", borderRadius: 8, cursor: "pointer", fontSize: 14 }}>←</button>
+        <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 18, color: C.text }}>
+          {MONTHS[viewMonth]} {viewYear}
+        </div>
+        <button onClick={nextMonth} style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.text, padding: "8px 14px", borderRadius: 8, cursor: "pointer", fontSize: 14 }}>→</button>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+        {[
+          { color: C.green, label: `${greenDays} verde` },
+          { color: C.red, label: `${redDays} rosso` },
+          { color: C.blue, label: `${noTradeDays} no trade` },
+          { color: totalResult >= 0 ? C.green : C.red, label: `${totalResult >= 0 ? "+" : ""}${totalResult.toFixed(1)}% mese` },
+        ].map((s, i) => (
+          <div key={i} style={{ background: `${s.color}20`, border: `1px solid ${s.color}44`, borderRadius: 20, padding: "4px 12px", fontFamily: "'DM Mono', monospace", fontSize: 11, color: s.color }}>{s.label}</div>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, marginBottom: 4 }}>
+        {weekDays.map(d => (
+          <div key={d} style={{ textAlign: "center", fontFamily: "'DM Mono', monospace", fontSize: 10, color: C.dim, padding: "6px 0" }}>{d}</div>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 }}>
+        {Array.from({ length: offset }).map((_, i) => <div key={`e${i}`} />)}
+        {Array.from({ length: daysInMonth }).map((_, i) => {
+          const day = i + 1;
+          const key = getDateKey(day);
+          const color = dayColor(key);
+          const d = calendarDays[key];
+          const isToday = key === new Date().toISOString().split("T")[0];
+          const isWeekend = [6, 0].includes(new Date(viewYear, viewMonth, day).getDay());
+
+          return (
+            <div key={day} onClick={() => setSelectedDay(selectedDay === key ? null : key)}
+              style={{ aspectRatio: "1", borderRadius: 8, background: color ? `${color}25` : isWeekend ? C.bg : C.surface, border: `1.5px solid ${color || (isToday ? C.accent : C.border)}`, cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", position: "relative", transition: "all 0.15s" }}>
+              <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: color || (isWeekend ? C.dim : C.text), fontWeight: isToday ? 700 : 400 }}>{day}</div>
+              {d?.result !== undefined && d.type !== "no-trade" && (
+                <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 9, color: color, marginTop: 1 }}>
+                  {d.result > 0 ? "+" : ""}{d.result.toFixed(1)}%
+                </div>
+              )}
+              {d?.type === "no-trade" && (
+                <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 8, color: C.blue, marginTop: 1 }}>NO</div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {selectedDay && (
+        <div style={{ marginTop: 16, background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "18px 20px" }}>
+          <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: C.accentDim, letterSpacing: 2, marginBottom: 12 }}>
+            {selectedDay} — AGGIUNGI/MODIFICA
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+            {[
+              { label: "🟢 Profitto", type: "profit", color: C.green },
+              { label: "🔴 Loss", type: "loss", color: C.red },
+              { label: "🔵 No Trade", type: "no-trade", color: C.blue },
+              { label: "🟡 Break-even", type: "breakeven", color: C.yellow },
+            ].map(opt => (
+              <button key={opt.type} onClick={() => {
+                const result = opt.type === "profit" ? 1 : opt.type === "loss" ? -1 : 0;
+                setCalendarDays(p => ({ ...p, [selectedDay]: { type: opt.type, result } }));
+              }} style={{ padding: "8px 14px", background: calendarDays[selectedDay]?.type === opt.type ? `${opt.color}30` : C.surface, border: `1px solid ${calendarDays[selectedDay]?.type === opt.type ? opt.color : C.border}`, borderRadius: 8, color: C.text, cursor: "pointer", fontSize: 12, fontFamily: "'DM Mono', monospace" }}>
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          {calendarDays[selectedDay]?.type !== "no-trade" && (
+            <div>
+              <Label>Risultato % preciso</Label>
+              <input type="number" step="0.1" placeholder="Es: 2.3" onChange={e => {
+                const val = parseFloat(e.target.value) || 0;
+                setCalendarDays(p => ({ ...p, [selectedDay]: { ...p[selectedDay], result: val } }));
+              }} style={{ width: "100%", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 12px", color: C.text, fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ marginTop: 16, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "12px 16px" }}>
+        <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: C.dim, marginBottom: 8 }}>LEGENDA</div>
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+          {[
+            { color: C.green, label: "Giorno verde (profitto)" },
+            { color: C.red, label: "Giorno rosso (loss)" },
+            { color: C.blue, label: "No Trade (vittoria invisibile)" },
+            { color: C.yellow, label: "Break-even" },
+          ].map((l, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <div style={{ width: 10, height: 10, borderRadius: 3, background: l.color }} />
+              <span style={{ fontSize: 11, color: C.muted, fontFamily: "'DM Mono', monospace" }}>{l.label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const MONTHS = ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"];
+
 function SectionTitle({ icon, title, sub }) {
   return (
     <div style={{ marginBottom: 20 }}>
@@ -535,14 +653,13 @@ function CheckItem({ label, checked, onChange }) {
 }
 
 function Slider({ label, value, onChange, color }) {
-  const c = typeof color === "function" ? color(value) : color;
   return (
     <div style={{ marginBottom: 14 }}>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
         <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#7a8099" }}>{label}</div>
-        <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: c, fontWeight: 500 }}>{value}/10</div>
+        <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color, fontWeight: 500 }}>{value}/10</div>
       </div>
-      <input type="range" min={1} max={10} value={value} onChange={e => onChange(Number(e.target.value))} style={{ width: "100%", accentColor: c, cursor: "pointer" }} />
+      <input type="range" min={1} max={10} value={value} onChange={e => onChange(Number(e.target.value))} style={{ width: "100%", accentColor: color, cursor: "pointer" }} />
     </div>
   );
 }
